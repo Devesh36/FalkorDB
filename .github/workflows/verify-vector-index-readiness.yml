@@ -1,0 +1,52 @@
+name: Verify vector index readiness 3382
+on:
+  push:
+    branches: [verify/vector-index-readiness-3382]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    container: ghcr.io/falkordb/falkordb-build:latest
+    env:
+      CARGO_PROFILE_RELEASE_LTO: 'false'
+      RUSTDOCFLAGS: '-C link-arg=-Wl,--allow-multiple-definition'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - run: rustup default stable
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Confirm regression fails without the fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp graph/src/index/indexer.rs /tmp/indexer-fixed.rs
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('graph/src/index/indexer.rs')
+          source = path.read_text()
+          # Use the exact source guard, keeping the new regression test.
+          start = source.index('            if !index.is_operational() {', source.index('    pub fn vector_query('))
+          end = source.index('            return index.vector_query(', start)
+          path.write_text(source[:start] + source[end:])
+          PY
+          set +e
+          cargo test --release -p graph vector_query_rejects_pending_population --lib > /tmp/baseline.log 2>&1
+          result=$?
+          set -e
+          cat /tmp/baseline.log
+          cp /tmp/indexer-fixed.rs graph/src/index/indexer.rs
+          test "$result" -ne 0
+          grep -F 'test index::indexer::tests::vector_query_rejects_pending_population ... FAILED' /tmp/baseline.log
+      - name: Run fixed graph unit tests
+        run: cargo test --release -p graph --lib
+      - name: Build module
+        run: cargo build --release
+      - name: Run vector flow tests
+        shell: bash
+        run: |
+          source /data/venv/bin/activate
+          RELEASE=1 TEST=tests/flow/test_vecsim FAIL_FAST=1 bash flow.sh
